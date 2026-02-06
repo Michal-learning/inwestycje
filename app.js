@@ -257,6 +257,15 @@ btnReset.addEventListener("click", ()=>{
   render();
 });
 
+function chunk(arr, size){
+  const out = [];
+  for(let i=0; i<arr.length; i+=size){
+    out.push(arr.slice(i, i+size));
+  }
+  return out;
+}
+
+
 btnRefresh.addEventListener("click", async ()=>{
   setMsg("");
 
@@ -295,7 +304,16 @@ if(fxPrev && !haveMissingPrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
       ...(needsEUR ? ["eurpln"] : []),
     ])];
 
-    const rows = await fetchStooqQuotes(symbols);
+    const rows = [];
+const batches = chunk(symbols, 3); // 3 to bezpieczna liczba dla Stooq
+
+for(const batch of batches){
+  const part = await fetchStooqQuotes(batch);
+  rows.push(...part);
+  await new Promise(r => setTimeout(r, 200));
+}
+
+
 
     const priceBySymbol = new Map();
     for(const r of rows){
