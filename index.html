@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Kontrola inwestycji (MVP)</title>
+    <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+    <div class="wrap">
+        <div class="top">
+            <div>
+                <div class="title">Kontrola inwestycji (MVP)</div>
+                <div class="sub">Źródło cen: Stooq. Jedno kliknięcie = ceny + FX + suma w PLN.</div>
+            </div>
+            <div class="actions">
+                <button id="refreshBtn">Odśwież (Stooq)</button>
+                <button class="secondary" id="resetBtn" title="Czyści localStorage">Reset danych</button>
+            </div>
+        </div>
+
+        <div class="card">
+            <div class="row">
+                <div>
+                    <label>Nazwa (dla ciebie)</label>
+                    <input id="name" placeholder="np. Orlen / World" />
+                </div>
+                <div>
+                    <label>Symbol (Stooq)</label>
+                    <input id="symbol" placeholder="np. aapl.us / xtb.pl / spy.us" />
+                </div>
+                <div>
+                    <label>Waluta</label>
+                    <select id="ccy">
+                        <option>PLN</option>
+                        <option>USD</option>
+                        <option>EUR</option>
+                    </select>
+                </div>
+                <div>
+                    <label>Ilość</label>
+                    <input id="qty" class="small" type="number" step="0.0001" placeholder="np. 3" />
+                </div>
+                <div>
+                    <button id="addBtn">Dodaj</button>
+                </div>
+            </div>
+
+            <div class="kpi">
+                <div class="box">
+                    <div class="label">Suma portfela (PLN)</div>
+                    <div class="val" id="sumPln">0,00 zł</div>
+                </div>
+                <div class="box">
+                    <div class="label">Kurs USD/PLN</div>
+                    <div class="val" id="usdpln">-</div>
+                </div>
+                <div class="box">
+                    <div class="label">Kurs EUR/PLN</div>
+                    <div class="val" id="eurpln">-</div>
+                </div>
+                <div class="box">
+                    <div class="label">Ostatnie odświeżenie</div>
+                    <div class="val" id="lastRefresh">-</div>
+                </div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Nazwa</th>
+                        <th>Symbol</th>
+                        <th>Waluta</th>
+                        <th class="num">Ilość</th>
+                        <th class="num">Cena</th>
+                        <th class="num">Wartość (PLN)</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="tbody"></tbody>
+            </table>
+
+            <div class="hint">
+                Symbole wpisuj jako stooqowe, np. <code>aapl.us</code>, <code>msft.us</code>, <code>xtb.pl</code>.
+                FX jest brany z <code>usdpln</code> i <code>eurpln</code>.
+            </div>
+
+            <div class="hint err" id="msg"></div>
+        </div>
+    </div>
+
+    <script src="./app.js"></script>
+</body>
+</html>
