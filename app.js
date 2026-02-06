@@ -157,13 +157,28 @@ async function fetchStooqQuotes(symbols){
 
   const csvText = await fetchViaWorker(rawUrl);
 
-  // Jeśli proxy zwróci HTML (blokada/limit), nie udawaj CSV
+  // HTML = blokada/limit
   if(/<html|<!doctype/i.test(csvText)){
     throw new Error("Proxy zwróciło HTML zamiast CSV (blokada/limit).");
   }
 
-  return parseCsv(csvText);
+  const trimmed = (csvText || "").trim();
+  const firstLine = trimmed.split(/\r?\n/)[0] || "";
+
+  // Jeśli Stooq/proxy zwraca śmieci/1 linię/pustkę – nie udawaj, że to ok
+  const lines = trimmed.split(/\r?\n/).filter(Boolean);
+  if(lines.length < 2){
+    throw new Error("Stooq nie zwrócił danych (za mało linii). Pierwsza linia: " + firstLine.slice(0, 120));
+  }
+
+  // Czasem potrafi zwrócić komunikat tekstowy zamiast CSV
+  if(!/Symbol/i.test(firstLine)){
+    throw new Error("Stooq zwrócił nietypową odpowiedź zamiast CSV. Pierwsza linia: " + firstLine.slice(0, 120));
+  }
+
+  return parseCsv(trimmed);
 }
+
 
 // ---- RENDER ----
 function render(){
@@ -308,10 +323,30 @@ if(fxPrev && !haveMissingPrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
 const batches = chunk(symbols, 3); // 3 to bezpieczna liczba dla Stooq
 
 for(const batch of batches){
-  const part = await fetchStooqQuotes(batch);
+  let part = null;
+  let lastErr = null;
+
+  for(let attempt=1; attempt<=2; attempt++){
+    try{
+      part = await fetchStooqQuotes(batch);
+      break;
+    } catch(e){
+      lastErr = e;
+      // backoff: 400ms potem 900ms
+      await new Promise(r => setTimeout(r, attempt === 1 ? 400 : 900));
+    }
+  }
+
+  if(!part){
+    throw new Error("Batch nie przeszedł: [" + batch.join(", ") + "]. Powód: " + (lastErr?.message || lastErr));
+  }
+
   rows.push(...part);
-  await new Promise(r => setTimeout(r, 200));
+
+  // mała przerwa między batchami, żeby Stooq nie robił fochów
+  await new Promise(r => setTimeout(r, 350));
 }
+
 
 
 
