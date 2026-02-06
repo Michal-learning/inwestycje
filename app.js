@@ -278,15 +278,16 @@ btnRefresh.addEventListener("click", async ()=>{
 
     const fxPrev = loadFx();
 
-    // Cache tylko jeśli:
-    // - niedawno odświeżane
-    // - oraz masz już jakieś ceny (żeby nie blokować przy pustych)
-    const haveSomePrices = holdings.some(h => Number.isFinite(h.lastPrice));
-    if(fxPrev && haveSomePrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
-      setMsg(`Cache: ostatnie odświeżenie było niedawno (min ${MIN_REFRESH_HOURS}h).`, "ok");
-      render();
-      return;
-    }
+    // Cache blokuje tylko jeśli:
+// - niedawno odświeżane
+// - i NIE masz braków w cenach (czyli nie blokujemy nowo dodanych pozycji)
+const haveMissingPrices = holdings.some(h => !Number.isFinite(h.lastPrice));
+if(fxPrev && !haveMissingPrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
+  setMsg(`Cache: ostatnie odświeżenie było niedawno (min ${MIN_REFRESH_HOURS}h).`, "ok");
+  render();
+  return;
+}
+
 
     const symbols = [...new Set([
       ...holdings.map(h => h.symbol),
