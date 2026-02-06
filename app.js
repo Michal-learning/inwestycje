@@ -1,20 +1,14 @@
 /* Kontrola inwestycji (MVP) – Stooq (frontend-only)
-   Stooq nie daje CORS -> potrzebujesz proxy.
-   Ten plik używa Twojego Cloudflare Worker jako proxy (najstabilniej).
-
-   Fixy:
-   - FX (usdpln/eurpln) pobieramy tylko gdy faktycznie potrzebne
-   - twardy check: jeśli nie ma cen dla symboli -> błąd (UI nie kłamie "odświeżono")
-   - defensywa dla localStorage i formatowania liczb
+   - Stooq bez CORS -> używamy Twojego Cloudflare Worker jako proxy
+   - Najstabilniej: 1 symbol = 1 request (batch na stooq.pl potrafi zwracać "B/D")
 */
 
 const LS_KEY = "inv_mvp_holdings_v3_stooq";
 const LS_FX  = "inv_mvp_fx_v3_stooq";
 
-// Twoje proxy (Cloudflare Worker):
 const PROXY_WORKER = "https://crimson-tooth-900e.michalbursztyn103.workers.dev/?url=";
 
-// cache: żeby nie katować proxy (ale nie blokuj, jeśli nie masz cen)
+// cache (nie blokuje, jeśli są braki cen)
 const MIN_REFRESH_HOURS = 1;
 
 // DOM
@@ -69,6 +63,11 @@ function hoursSince(iso){
   return (Date.now() - t) / (1000*60*60);
 }
 
+function normSymbol(input){
+  const s = (input || "").trim().toLowerCase();
+  return s.endsWith(".pl") ? s.slice(0, -3) : s;
+}
+
 function loadHoldings(){
   try{
     const v = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
@@ -104,20 +103,28 @@ function saveFx(obj){
 }
 
 function safeFloat(x){
-  // Stooq zwraca kropkę, ale defensywnie też wspieramy przecinek
-  const n = parseFloat(String(x).replace(",", "."));
+  const n = parseFloat(String(x ?? "").replace(",", "."));
   return Number.isFinite(n) ? n : NaN;
 }
 
+function getCloseFromRow(r){
+  const closeRaw =
+    r.Close ?? r.close ??
+    r.Zamkniecie ?? r.zamkniecie ?? r["Zamkniecie"] ??
+    r.Zamknięcie ?? r["Zamknięcie"];
+  return safeFloat(closeRaw);
+}
+
 function parseCsv(csvText){
-  const lines = csvText.trim().split(/\r?\n/).filter(Boolean);
+  const trimmed = (csvText || "").trim();
+  const lines = trimmed.split(/\r?\n/).filter(Boolean);
   if(lines.length < 2) return [];
 
   const headers = lines[0].split(",").map(h => h.trim());
   const rows = [];
 
   for(let i=1; i<lines.length; i++){
-    const parts = lines[i].split(",").map(x => NoticeTrim(x));
+    const parts = lines[i].split(",").map(x => (x ?? "").toString().trim());
     const obj = {};
     for(let j=0; j<headers.length; j++){
       obj[headers[j]] = parts[j] ?? "";
@@ -127,21 +134,15 @@ function parseCsv(csvText){
   return rows;
 }
 
-function NoticeTrim(x){
-  return (x ?? "").toString().trim();
-}
-
 // ---- STOOQ FETCH (via your Worker) ----
-function buildStooqUrl(symbols){
-  const s = symbols
-    .map(x => (x || "").trim().toLowerCase())
-    .filter(Boolean)
-    .join(",");
-
+// Uwaga: dla GPW stooq.pl bywa stabilniejsze; batch na stooq.pl bywa zepsuty ("B/D"),
+// ale my i tak pobieramy pojedynczo, więc jest ok.
+function buildStooqUrl(symbol){
+  const s = normSymbol(symbol);
   if(!s) return null;
 
-  // f=sd2t2ohlcv -> Symbol,Date,Time,Open,High,Low,Close,Volume
-  return `https://stooq.com/q/l/?s=${encodeURIComponent(s)}&f=sd2t2ohlcv&h&e=csv`;
+  // f=sd2t2ohlcv -> Symbol,Date/ Data,Time/ Czas,Open/Otwarcie,High/Najwyzszy,Low/Najnizszy,Close/Zamkniecie,Volume/Wolumen
+  return `https://stooq.pl/q/l/?s=${encodeURIComponent(s)}&f=sd2t2ohlcv&h&e=csv`;
 }
 
 async function fetchViaWorker(rawUrl){
@@ -151,34 +152,34 @@ async function fetchViaWorker(rawUrl){
   return await r.text();
 }
 
-async function fetchStooqQuotes(symbols){
-  const rawUrl = buildStooqUrl(symbols);
-  if(!rawUrl) return [];
+async function fetchOneSymbolClose(symbol){
+  const rawUrl = buildStooqUrl(symbol);
+  if(!rawUrl) throw new Error("Pusty symbol");
 
   const csvText = await fetchViaWorker(rawUrl);
 
-  // HTML = blokada/limit
   if(/<html|<!doctype/i.test(csvText)){
     throw new Error("Proxy zwróciło HTML zamiast CSV (blokada/limit).");
   }
 
   const trimmed = (csvText || "").trim();
   const firstLine = trimmed.split(/\r?\n/)[0] || "";
-
-  // Jeśli Stooq/proxy zwraca śmieci/1 linię/pustkę – nie udawaj, że to ok
   const lines = trimmed.split(/\r?\n/).filter(Boolean);
   if(lines.length < 2){
     throw new Error("Stooq nie zwrócił danych (za mało linii). Pierwsza linia: " + firstLine.slice(0, 120));
   }
-
-  // Czasem potrafi zwrócić komunikat tekstowy zamiast CSV
   if(!/Symbol/i.test(firstLine)){
     throw new Error("Stooq zwrócił nietypową odpowiedź zamiast CSV. Pierwsza linia: " + firstLine.slice(0, 120));
   }
 
-  return parseCsv(trimmed);
-}
+  const rows = parseCsv(trimmed);
+  if(!rows.length) throw new Error("Brak wierszy danych dla " + symbol);
 
+  const close = getCloseFromRow(rows[0]);
+  if(!Number.isFinite(close)) throw new Error("Brak ceny (Close/Zamkniecie) dla " + symbol);
+
+  return close;
+}
 
 // ---- RENDER ----
 function render(){
@@ -236,7 +237,7 @@ btnAdd.addEventListener("click", ()=>{
   setMsg("");
 
   const name = elName.value.trim();
-  const symbol = elSymbol.value.trim().toLowerCase();
+  const symbol = normSymbol(elSymbol.value);
   const ccy = elCcy.value;
   const qty = parseFloat(elQty.value);
 
@@ -272,15 +273,6 @@ btnReset.addEventListener("click", ()=>{
   render();
 });
 
-function chunk(arr, size){
-  const out = [];
-  for(let i=0; i<arr.length; i+=size){
-    out.push(arr.slice(i, i+size));
-  }
-  return out;
-}
-
-
 btnRefresh.addEventListener("click", async ()=>{
   setMsg("");
 
@@ -303,72 +295,49 @@ btnRefresh.addEventListener("click", async ()=>{
     const fxPrev = loadFx();
 
     // Cache blokuje tylko jeśli:
-// - niedawno odświeżane
-// - i NIE masz braków w cenach (czyli nie blokujemy nowo dodanych pozycji)
-const haveMissingPrices = holdings.some(h => !Number.isFinite(h.lastPrice));
-if(fxPrev && !haveMissingPrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
-  setMsg(`Cache: ostatnie odświeżenie było niedawno (min ${MIN_REFRESH_HOURS}h).`, "ok");
-  render();
-  return;
-}
+    // - niedawno odświeżane
+    // - i NIE masz braków w cenach (czyli nie blokujemy nowo dodanych pozycji)
+    const haveMissingPrices = holdings.some(h => !Number.isFinite(h.lastPrice));
+    if(fxPrev && !haveMissingPrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
+      setMsg(`Cache: ostatnie odświeżenie było niedawno (min ${MIN_REFRESH_HOURS}h).`, "ok");
+      render();
+      return;
+    }
 
-
+    // budujemy listę unikalnych symboli do pobrania (pojedynczo)
     const symbols = [...new Set([
-      ...holdings.map(h => h.symbol),
+      ...holdings.map(h => normSymbol(h.symbol)),
       ...(needsUSD ? ["usdpln"] : []),
       ...(needsEUR ? ["eurpln"] : []),
     ])];
 
-    const rows = [];
-const batches = chunk(symbols, 3); // 3 to bezpieczna liczba dla Stooq
-
-for(const batch of batches){
-  let part = null;
-  let lastErr = null;
-
-  for(let attempt=1; attempt<=2; attempt++){
-    try{
-      part = await fetchStooqQuotes(batch);
-      break;
-    } catch(e){
-      lastErr = e;
-      // backoff: 400ms potem 900ms
-      await new Promise(r => setTimeout(r, attempt === 1 ? 400 : 900));
-    }
-  }
-
-  if(!part){
-    throw new Error("Batch nie przeszedł: [" + batch.join(", ") + "]. Powód: " + (lastErr?.message || lastErr));
-  }
-
-  rows.push(...part);
-
-  // mała przerwa między batchami, żeby Stooq nie robił fochów
-  await new Promise(r => setTimeout(r, 350));
-}
-
-
-
-
     const priceBySymbol = new Map();
-    for(const r of rows){
-  const sym = NoticeTrim(r.Symbol || r.symbol).toLowerCase();
 
-  // Stooq.com ma Close/Open/High/Low, a stooq.pl ma Zamkniecie/Otwarcie/Najwyzszy/Najnizszy
-  const closeRaw =
-    r.Close ?? r.close ??
-    r.Zamkniecie ?? r.zamkniecie ??
-    r["Zamkniecie"];
+    for(const sym of symbols){
+      let lastErr = null;
 
-  const close = safeFloat(closeRaw);
+      for(let attempt=1; attempt<=2; attempt++){
+        try{
+          const close = await fetchOneSymbolClose(sym);
+          priceBySymbol.set(sym.toLowerCase(), close);
+          lastErr = null;
+          break;
+        } catch(e){
+          lastErr = e;
+          await new Promise(r => setTimeout(r, attempt === 1 ? 350 : 800));
+        }
+      }
 
-  if(sym) priceBySymbol.set(sym, close);
-}
+      if(lastErr){
+        throw new Error("Nie udało się pobrać: " + sym + ". Powód: " + (lastErr.message || lastErr));
+      }
 
+      await new Promise(r => setTimeout(r, 200));
+    }
 
-    // Twardy check: jeśli nie mamy ceny dla jakiegoś symbolu z portfela, nie udajemy sukcesu.
+    // Twardy check: jeśli nie mamy ceny dla symboli z portfela, nie udajemy sukcesu.
     const missing = holdings
-      .map(h => (h.symbol || "").toLowerCase())
+      .map(h => normSymbol(h.symbol))
       .filter(sym => !Number.isFinite(priceBySymbol.get(sym)));
 
     if(missing.length){
@@ -386,7 +355,7 @@ for(const batch of batches){
     }
 
     for(const h of holdings){
-      const p = priceBySymbol.get((h.symbol || "").toLowerCase());
+      const p = priceBySymbol.get(normSymbol(h.symbol));
       h.lastPrice = p;
       h.lastPriceTs = nowIso();
     }
