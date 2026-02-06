@@ -1,16 +1,20 @@
 /* Kontrola inwestycji (MVP) – Stooq (frontend-only)
-   Stooq nie daje CORS => "Failed to fetch".
-   Rozwiązanie: CORS proxy (AllOrigins -> corsproxy.io -> r.jina.ai)
+   Stooq nie daje CORS -> potrzebujesz proxy.
+   Ten plik używa Twojego Cloudflare Worker jako proxy (najstabilniej).
+
    Fixy:
    - FX (usdpln/eurpln) pobieramy tylko gdy faktycznie potrzebne
-   - wykrywamy HTML zamiast CSV (proxy limit/blokada)
+   - twardy check: jeśli nie ma cen dla symboli -> błąd (UI nie kłamie "odświeżono")
    - defensywa dla localStorage i formatowania liczb
 */
 
 const LS_KEY = "inv_mvp_holdings_v3_stooq";
 const LS_FX  = "inv_mvp_fx_v3_stooq";
 
-// cache, żebyś nie klikał 30 razy "bo nie ufam"
+// Twoje proxy (Cloudflare Worker):
+const PROXY_WORKER = "https://crimson-tooth-900e.michalbursztyn103.workers.dev/?url=";
+
+// cache: żeby nie katować proxy (ale nie blokuj, jeśli nie masz cen)
 const MIN_REFRESH_HOURS = 1;
 
 // DOM
@@ -33,7 +37,6 @@ const btnReset = document.getElementById("resetBtn");
 // helpers
 const nowIso = () => new Date().toISOString();
 
-// Number(null) => 0 (ok), Number("") => 0 (ok), Number("1,23") => NaN (dlatego safeFloat niżej)
 const n0 = (x) => {
   const v = Number(x);
   return Number.isFinite(v) ? v : 0;
@@ -114,7 +117,7 @@ function parseCsv(csvText){
   const rows = [];
 
   for(let i=1; i<lines.length; i++){
-    const parts = lines[i].split(",").map(x => x.trim());
+    const parts = lines[i].split(",").map(x => NoticeTrim(x));
     const obj = {};
     for(let j=0; j<headers.length; j++){
       obj[headers[j]] = parts[j] ?? "";
@@ -124,7 +127,11 @@ function parseCsv(csvText){
   return rows;
 }
 
-// ---- STOOQ FETCH (CORS proxy) ----
+function NoticeTrim(x){
+  return (x ?? "").toString().trim();
+}
+
+// ---- STOOQ FETCH (via your Worker) ----
 function buildStooqUrl(symbols){
   const s = symbols
     .map(x => (x || "").trim().toLowerCase())
@@ -137,42 +144,22 @@ function buildStooqUrl(symbols){
   return `https://stooq.com/q/l/?s=${encodeURIComponent(s)}&f=sd2t2ohlcv&h&e=csv`;
 }
 
-async function fetchViaProxy(rawUrl){
-  // Proxy #1: AllOrigins GET (ma CORS), zwraca JSON { contents: "..." }
-  const u1 = `https://api.allorigins.win/get?url=${encodeURIComponent(rawUrl)}`;
-  try{
-    const r1 = await fetch(u1, { cache: "no-store" });
-    if(!r1.ok) throw new Error("AllOrigins GET HTTP " + r1.status);
-    const j = await r1.json();
-    if(!j || typeof j.contents !== "string") throw new Error("AllOrigins GET: brak contents");
-    return j.contents;
-  } catch {
-    // Proxy #2: corsproxy.io
-    const u2 = `https://corsproxy.io/?${encodeURIComponent(rawUrl)}`;
-    try{
-      const r2 = await fetch(u2, { cache: "no-store" });
-      if(!r2.ok) throw new Error("corsproxy.io HTTP " + r2.status);
-      return await r2.text();
-    } catch {
-      // Proxy #3: r.jina.ai
-      const u3 = `https://r.jina.ai/${rawUrl}`;
-      const r3 = await fetch(u3, { cache: "no-store" });
-      if(!r3.ok) throw new Error("jina.ai HTTP " + r3.status);
-      return await r3.text();
-    }
-  }
+async function fetchViaWorker(rawUrl){
+  const u = PROXY_WORKER + encodeURIComponent(rawUrl);
+  const r = await fetch(u, { cache: "no-store" });
+  if(!r.ok) throw new Error("Proxy worker HTTP " + r.status);
+  return await r.text();
 }
-
 
 async function fetchStooqQuotes(symbols){
   const rawUrl = buildStooqUrl(symbols);
   if(!rawUrl) return [];
 
-  const csvText = await fetchViaProxy(rawUrl);
+  const csvText = await fetchViaWorker(rawUrl);
 
-  // Jeśli proxy zwróci HTML (limit/blokada), nie próbuj udawać CSV
+  // Jeśli proxy zwróci HTML (blokada/limit), nie udawaj CSV
   if(/<html|<!doctype/i.test(csvText)){
-    throw new Error("Proxy zwróciło HTML zamiast CSV (limit/blokada). Spróbuj ponownie za chwilę.");
+    throw new Error("Proxy zwróciło HTML zamiast CSV (blokada/limit).");
   }
 
   return parseCsv(csvText);
@@ -238,8 +225,8 @@ btnAdd.addEventListener("click", ()=>{
   const ccy = elCcy.value;
   const qty = parseFloat(elQty.value);
 
-  if(!name) return setMsg("Podaj nazwę. Tak, to dalej obowiązuje.");
-  if(!symbol) return setMsg("Podaj symbol Stooq. Bez tego nie ma ceny.");
+  if(!name) return setMsg("Podaj nazwę.");
+  if(!symbol) return setMsg("Podaj symbol Stooq.");
   if(!Number.isFinite(qty) || qty <= 0) return setMsg("Ilość ma być > 0.");
 
   const list = loadHoldings();
@@ -259,14 +246,14 @@ btnAdd.addEventListener("click", ()=>{
   elQty.value = "";
 
   render();
-  setMsg("Dodano. Teraz możesz kliknąć Odśwież.", "ok");
+  setMsg("Dodano. Teraz kliknij Odśwież.", "ok");
 });
 
 btnReset.addEventListener("click", ()=>{
   if(!confirm("Na pewno wyczyścić wszystko?")) return;
   localStorage.removeItem(LS_KEY);
   localStorage.removeItem(LS_FX);
-  setMsg("Wyczyszczone. Jak w głowie po sesji.", "ok");
+  setMsg("Wyczyszczone.", "ok");
   render();
 });
 
@@ -282,18 +269,20 @@ btnRefresh.addEventListener("click", async ()=>{
     if(!Array.isArray(holdings)) holdings = [];
 
     if(holdings.length === 0){
-      setMsg("Nie masz żadnych pozycji. Dodaj coś, potem odświeżaj.", "err");
+      setMsg("Nie masz żadnych pozycji.", "err");
       return;
     }
 
-    // Czy w ogóle potrzebujemy FX?
     const needsUSD = holdings.some(h => h.ccy === "USD");
     const needsEUR = holdings.some(h => h.ccy === "EUR");
 
-    // Cache: dotyczy tylko FX (żeby nie katować proxy).
-    // Ceny akcji też są przez ten sam request, ale MVPowo trzymamy prostą zasadę.
     const fxPrev = loadFx();
-    if(fxPrev && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
+
+    // Cache tylko jeśli:
+    // - niedawno odświeżane
+    // - oraz masz już jakieś ceny (żeby nie blokować przy pustych)
+    const haveSomePrices = holdings.some(h => Number.isFinite(h.lastPrice));
+    if(fxPrev && haveSomePrices && hoursSince(fxPrev.ts) < MIN_REFRESH_HOURS){
       setMsg(`Cache: ostatnie odświeżenie było niedawno (min ${MIN_REFRESH_HOURS}h).`, "ok");
       render();
       return;
@@ -309,24 +298,33 @@ btnRefresh.addEventListener("click", async ()=>{
 
     const priceBySymbol = new Map();
     for(const r of rows){
-      const sym = (r.Symbol || r.symbol || "").trim().toLowerCase();
+      const sym = NoticeTrim(r.Symbol || r.symbol).toLowerCase();
       const close = safeFloat(r.Close ?? r.close);
       if(sym) priceBySymbol.set(sym, close);
+    }
+
+    // Twardy check: jeśli nie mamy ceny dla jakiegoś symbolu z portfela, nie udajemy sukcesu.
+    const missing = holdings
+      .map(h => (h.symbol || "").toLowerCase())
+      .filter(sym => !Number.isFinite(priceBySymbol.get(sym)));
+
+    if(missing.length){
+      throw new Error("Brak cen dla: " + missing.join(", ") + " (symbol Stooq albo problem po stronie Stooq/proxy).");
     }
 
     const usdpln = needsUSD ? priceBySymbol.get("usdpln") : undefined;
     const eurpln = needsEUR ? priceBySymbol.get("eurpln") : undefined;
 
     if(needsUSD && !Number.isFinite(usdpln)){
-      throw new Error("Nie udało się pobrać USD/PLN. Proxy/Stooq może chwilowo nie działać.");
+      throw new Error("Nie udało się pobrać USD/PLN.");
     }
     if(needsEUR && !Number.isFinite(eurpln)){
-      throw new Error("Nie udało się pobrać EUR/PLN. Proxy/Stooq może chwilowo nie działać.");
+      throw new Error("Nie udało się pobrać EUR/PLN.");
     }
 
     for(const h of holdings){
       const p = priceBySymbol.get((h.symbol || "").toLowerCase());
-      h.lastPrice = Number.isFinite(p) ? p : NaN;
+      h.lastPrice = p;
       h.lastPriceTs = nowIso();
     }
 
@@ -339,11 +337,11 @@ btnRefresh.addEventListener("click", async ()=>{
       ts: nowIso()
     });
 
-    setMsg("Odświeżono. Tak, działa. Nie, nie klikaj 10x.", "ok");
+    setMsg("Odświeżono.", "ok");
     render();
 
   } catch(e){
-    setMsg(String(e?.message || e));
+    setMsg(String(e?.message || e), "err");
     render();
   } finally{
     btn.disabled = false;
