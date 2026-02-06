@@ -352,10 +352,19 @@ for(const batch of batches){
 
     const priceBySymbol = new Map();
     for(const r of rows){
-      const sym = NoticeTrim(r.Symbol || r.symbol).toLowerCase();
-      const close = safeFloat(r.Close ?? r.close);
-      if(sym) priceBySymbol.set(sym, close);
-    }
+  const sym = NoticeTrim(r.Symbol || r.symbol).toLowerCase();
+
+  // Stooq.com ma Close/Open/High/Low, a stooq.pl ma Zamkniecie/Otwarcie/Najwyzszy/Najnizszy
+  const closeRaw =
+    r.Close ?? r.close ??
+    r.Zamkniecie ?? r.zamkniecie ??
+    r["Zamkniecie"];
+
+  const close = safeFloat(closeRaw);
+
+  if(sym) priceBySymbol.set(sym, close);
+}
+
 
     // Twardy check: jeśli nie mamy ceny dla jakiegoś symbolu z portfela, nie udajemy sukcesu.
     const missing = holdings
